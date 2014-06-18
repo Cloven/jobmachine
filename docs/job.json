@@ -1,0 +1,5 @@
+{
+  "type": "shell",
+  "command": "/bin/ls",
+  "timeout": 500
+}
