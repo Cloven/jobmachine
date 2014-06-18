@@ -23,12 +23,15 @@
   {
     command,
     port,
-    timeout
+    timeout,
+    output
   }).
 
 %% ------------------------------------------------------------------
 %% Jobmachine Function Exports
 %% ------------------------------------------------------------------
+
+-export([watchdog/2]).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -48,19 +51,30 @@ init([Command,Timeout]) ->
   WorkerState = #jm_worker_state{
     command = Command,
     port = open_port({spawn_executable, Command}, [stream, {line, 4096}, binary, exit_status, hide]),
-    timeout = Timeout
+    timeout = Timeout,
+    output = []
   },
+  spawn_link(jobmachine_worker, watchdog, [self(), Timeout]),
   {ok, WorkerState}.
 
 handle_call(_, _From, State) ->
   {reply, ok, State}.
 
-handle_cast(Msg, State) ->
-  io:format("msg: ~p~n",[Msg]),
+handle_info({_Port, {data, {_EolIndicator, LineData}}}, State=#jm_worker_state{output = Output} ) ->
+  io:format("info: ~p~n",[LineData]),
+  NewOutput = [LineData | Output],
+  NewState = State#jm_worker_state{ output = NewOutput },
+  {noreply, NewState};
+handle_info({_Port, {exit_status, ExitStatus}}, State) ->
+  io:format("port exited: ~p~n",[ExitStatus]),
+  io:format("end state: ~p~n",[State]),
   {noreply, State}.
 
-handle_info(Info, State) ->
-  io:format("info: ~p~n",[Info]),
+handle_cast({watchdog_timeout, Timeout}, State) ->
+  io:format("timeout reached: ~p~n",[Timeout]),
+  {noreply, State};
+handle_cast(Msg, State) ->
+  io:format("cast: ~p~n",[Msg]),
   {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -73,3 +87,11 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
+
+-spec watchdog(Pid :: pid, TimeoutMilliseconds :: non_neg_integer()) -> ok.
+watchdog(Pid, TimeoutMilliseconds) ->
+  receive
+  after TimeoutMilliseconds ->
+      gen_server:cast(Pid, {watchdog_timeout, TimeoutMilliseconds})
+  end,
+  ok.

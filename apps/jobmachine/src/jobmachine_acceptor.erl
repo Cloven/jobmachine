@@ -1,8 +1,15 @@
--module(jobmachine_engine).
+-module(jobmachine_acceptor).
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
 -include("jobmachine.hrl").
+
+-record(jm_worker_state, {
+    redis_client,
+    job_queue,
+    worker_queue
+  }).
+
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -18,41 +25,28 @@
          terminate/2, code_change/3]).
 
 %% ------------------------------------------------------------------
-%% Jobmachine Function Exports
-%% ------------------------------------------------------------------
-
--export([list_to_list_of_tuples/2]).
-%%
-%% ------------------------------------------------------------------
-%% Jobmachine Engine State 
-%% ------------------------------------------------------------------
-
--record(jm_engine_state, {
-    redis_client,
-    jobs
-  }).
-
-%% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
 start_link() ->
-    gen_server:start_link({local, jobmachine}, ?MODULE, [], []).
+    gen_server:start_link(?MODULE, [], []).  %% note: not registering names
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init(_State) ->
-  {ok, C} = eredis:start_link(),
-  Jobspecs = load_jobspecs(C),
-  Jobs2 = start_jobs(Jobspecs),
-  NewState = #jm_engine_state{jobs = Jobs2, redis_client = C},
+init({RedisHost, RedisPort, JobQueue}) ->
+  {ok, RedisClient} = eredis:start_link(RedisHost, RedisPort),
+  WorkerQueue = <<"blurp">>,
+  NewState = #jm_worker_state{ redis_client = RedisClient, job_queue = JobQueue, worker_queue = WorkerQueue },
+  gen_server:cast(self(), startup),
   {ok, NewState}.
 
 handle_call(_, _From, State) ->
     {reply, ok, State}.
 
+handle_cast(startup, State) ->
+  get_job(State);
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -69,14 +63,8 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
--spec(load_jobspecs(_RedisClient) -> J::list()).
-load_jobspecs(C) ->
-  {ok, Jobspecs} = eredis:q(C, ["hgetall", "jobspecs"]),
-  Jobtuples = list_to_list_of_tuples(Jobspecs),
-  [parse_job(J) || J <- Jobtuples].
-  
--spec(parse_job({JobName :: binary(), JobJson :: binary()}) -> #jm_job{}).
-parse_job({_Jobname, JobJson}) ->
+-spec(parse_job(JobJson :: binary()) -> #jm_job{}).
+parse_job(JobJson) ->
   io:format("json: ~p~n",[JobJson]),
   JobProplist = jsx:decode(JobJson),
   io:format("~p~n",[JobProplist]), 
@@ -90,20 +78,7 @@ parse_job({_Jobname, JobJson}) ->
                 },
   Job.
 
--spec(start_jobs(J::list(#jm_job{})) -> R::list()).
-start_jobs(Joblist) ->
-  [start_job(J) || J <- Joblist].
-
--spec(start_job(J :: #jm_job{}) -> #jm_job{}).
-start_job(#jm_job{name = Name, command = Command} = Job) ->
-  io:format("starting ~p ~p ~n", [Name, Command]),
-  Job2 = Job#jm_job{ state = started },
-  Job2.
-
-list_to_list_of_tuples(L) ->
-  list_to_list_of_tuples(L,[]).
-
--spec(list_to_list_of_tuples(L::list(),A::list()) -> B::list()).
-list_to_list_of_tuples([], Acc) -> Acc;
-list_to_list_of_tuples([H1,H2|T], Acc) ->
-  list_to_list_of_tuples(T, [{H1, H2} | Acc]).
+get_job(#jm_worker_state{redis_client = RedisClient, job_queue = JobQueue, worker_queue = WorkerQueue} = State) ->
+  {ok, Res} = eredis:q(RedisClient, ["BRPOPLPUSH", JobQueue, WorkerQueue, 0], infinity),
+  io:format("~p~n",[Res]),
+  get_job(State).
